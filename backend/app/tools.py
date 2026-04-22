@@ -7,8 +7,9 @@ load_dotenv()
 tavily=TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
 
 @tool
-def web_search(query:str)->str:
-    '''Search the web for the latest 2026 status of a technical library, hardware, or API. Use this to find if something is outdated, deprecated, or has a 2026 successor.'''
+def web_search(query:str, is_time_sensitive: bool)->str:
+    '''Search the web for the latest 2026 status of a technical library, hardware, or API. Use this to find if something is outdated, deprecated, or has a 2026 successor.
+    is_time_sensitive: Set to True for versions/hardware, False for math/foundations.'''
     response=tavily.search(query=query,search_depth="advanced",max_results=3)
     search_results=[
         f"Source: {res['url']}\nContent: {res['content']}"
