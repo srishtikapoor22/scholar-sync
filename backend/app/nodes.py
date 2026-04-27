@@ -4,11 +4,11 @@ from pydantic import BaseModel,Field
 from typing import List,Literal
 from dotenv import load_dotenv
 import os
-from langchain_core.messages import AIMessage
-from .tools import web_search
-from langchain_core.messages import ToolMessage, SystemMessage
+from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
 
-load_dotenv()
+# Load environment variables from project root
+project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+load_dotenv(os.path.join(project_root, '.env'))
 #we need this so that the llm finds multiple claims instead of just one
 class ExtractionOutput(BaseModel):
     #this collects all the tech claims in the paper
@@ -28,55 +28,91 @@ llm = ChatGroq(
 )
 
 def extraction_node(state: AuditState):
-    pdf_text=state["pdf_content"]
+    pdf_text = state["pdf_content"]
+    print(f"DEBUG: Extracting claims from {len(pdf_text)} characters of PDF content")
+    
     system_prompt = (
         """You are a Senior Technical Auditor specializing in Software Engineering and Research.
-        Your task is to extract technical claims (libraries, frameworks, hardware, and algorithms).
+        Your task is to extract ALL technical claims from the provided text, including:
+        - Programming languages and versions
+        - Libraries and frameworks
+        - Algorithms and models
+        - Hardware specifications
+        - Software tools and dependencies
 
-        CRITICAL: When generating a search query for a claim:
-        1. Append the domain context (e.g., instead of 'Adam', use 'Adam optimizer machine learning').
-        2. Instead of 'GPT-3', use 'GPT-3 model status and replacements 2026'.
-        3. Instead of 'PyTorch', use 'PyTorch latest version and features 2026'.
-        ### CATEGORIZATION RULES:
-        1. is_time_sensitive = FALSE (Foundational): 
-        - Core Math/Statistics (e.g., Euclidean Geometry, Bayesian Inference).
-        - Foundational CS Concepts (e.g., Linked Lists, BFS, Transformers, RNNs).
-        - Established Languages (e.g., Python, C++, Java).
+        Extract every technical mention, even if it seems basic. Be thorough and comprehensive.
 
-        2. is_time_sensitive = TRUE (Volatile):
-        - Specific Versions (e.g., React 19, CUDA 12.1).
-        - Brand New Research/Models (e.g., GPT-5, Llama-4, specific 2026 hardware).
-        - Cloud Services/API Endpoints (e.g., AWS Bedrock, Anthropic API).
-
-        ### FORMATTING RULE:
-        - The 'query' field must be the PURE name of the concept. 
-        - DO NOT append "2026 status" or "updates" to the query.
-        - Use the 'is_time_sensitive' boolean to indicate if a search is actually necessary."""
+        For each claim, determine if it's time-sensitive (likely to change by 2026):
+        - TRUE for specific versions, new technologies, or rapidly evolving tools
+        - FALSE for fundamental concepts, established languages, or core algorithms"""
     )
-    human_prompt = f"Identify all technical claims in the following text: \n\n {pdf_text}"
 
-    llm_with_tools=llm.bind_tools([web_search])
-    #langchain converts llm's json back to python object
-    result = llm_with_tools.invoke([
-        ("system", system_prompt),
-        ("human", f"Audit this text: {pdf_text}")
-    ])
-    extracted_claims = []
-    if result.tool_calls:
-        for call in result.tool_calls:
-            # We treat each tool call as a 'Claim' object to keep our State happy
-            new_claim = Claim(
-                text=call["args"].get("query", "Unknown"),
-                category="Technical Dependency", # You can refine this logic
-                page_label="Extraction Phase",
-                is_time_sensitive=call["args"].get("is_time_sensitive", True)
-            )
-            extracted_claims.append(new_claim)
+    # Use structured output to extract claims
+    try:
+        llm_with_structured = llm.with_structured_output(ExtractionOutput)
+        structured_result = llm_with_structured.invoke([
+            ("system", system_prompt),
+            ("human", f"Extract all technical claims from this text:\n\n{pdf_text[:3000]}")  # Limit input size
+        ])
+        extracted_claims = structured_result.claims if structured_result.claims else []
+        print(f"DEBUG: Extracted {len(extracted_claims)} claims via structured output")
+        
+        # Update time-sensitivity for structured claims if not properly set
+        for claim in extracted_claims:
+            if not hasattr(claim, 'is_time_sensitive') or claim.is_time_sensitive is None:
+                time_sensitive_keywords = [
+                    'gpt', 'bert', 'transformers', 'pytorch', 'tensorflow', 'cuda', 
+                    'gpu', 'api', 'version', 'latest', 'current', 'deprecated'
+                ]
+                claim.is_time_sensitive = any(keyword in claim.text.lower() for keyword in time_sensitive_keywords)
+    except Exception as e:
+        print(f"DEBUG: Structured output failed: {e}, trying simple LLM call...")
+        extracted_claims = []
     
-    #we return a dict that langraph uses to update the 'Audit state'
-    return{
+    # If no claims found, try a simpler approach
+    if not extracted_claims:
+        print("DEBUG: No claims from structured output, trying fallback...")
+        fallback_prompt = """Extract technical terms, libraries, frameworks, and tools from this text. List them as simple strings, one per line."""
+        
+        try:
+            simple_result = llm.invoke([
+                ("system", fallback_prompt),
+                ("human", pdf_text[:2000])  # Limit input size
+            ])
+            
+            if hasattr(simple_result, 'content') and simple_result.content:
+                # Parse the response into claims
+                lines = simple_result.content.strip().split('\n')
+                for line in lines:
+                    line = line.strip()
+                    if line and len(line) > 2:  # Filter out empty/short lines
+                        # Remove bullet points, numbers, etc.
+                        clean_line = line.lstrip('•-*123456789. ')
+                        if clean_line and len(clean_line) < 100:  # Reasonable length limit
+                            # Determine if this claim is time-sensitive (needs 2026 status check)
+                            time_sensitive_keywords = [
+                                'gpt', 'bert', 'transformers', 'pytorch', 'tensorflow', 'cuda', 
+                                'gpu', 'api', 'version', 'latest', 'current', 'deprecated'
+                            ]
+                            is_time_sensitive = any(keyword in clean_line.lower() for keyword in time_sensitive_keywords)
+                            
+                            extracted_claims.append(Claim(
+                                text=clean_line,
+                                category="Technical Dependency",
+                                page_label="Extraction Phase",
+                                is_time_sensitive=is_time_sensitive
+                            ))
+        except Exception as e:
+            print(f"DEBUG: Simple LLM call also failed: {e}")
+    
+    print(f"DEBUG: Final extracted claims: {[c.text for c in extracted_claims[:5]]}")  # Show first 5
+    
+    print(f"DEBUG: Final extracted claims: {[c.text for c in extracted_claims]}")
+    
+    # Return the claims
+    return {
         "claims": extracted_claims,
-        "messages": [result]
+        "messages": [AIMessage(content=f"Extracted {len(extracted_claims)} claims from PDF")]
     }
 
 def auditor_node(state:AuditState):
@@ -85,7 +121,7 @@ def auditor_node(state:AuditState):
 
     system_prompt=(
         """You are a Senior AI Research Auditor. Your task is to compare a 2021 technical paper 
-    against 2026 real-world data.
+    against 2026 real-world data and provide a final audit report.
 
     PAPER CONTENT:
     {content}
@@ -94,18 +130,19 @@ def auditor_node(state:AuditState):
     {search_results}
 
     Provide a professional Audit Report with these EXACT sections:
-    ##Executive Summary
-    (One sentence on the current relevance of the paper)
 
-    ##Verified Foundations
-    (List things that are still true/standard in 2026)
+## Executive Summary
+(One sentence on the current relevance of the paper)
 
-    ##Status Alerts (2026)
-    (List models/libraries that are deprecated, updated, or replaced. 
-    Be specific: mention PyTorch 2.11 or GPT-4/5 if found in search.)
+## Verified Foundations
+(List things that are still true/standard in 2026)
 
-    ##Critical Discrepancies
-    (Correct any specific "stale" facts from the paper using the search data)
+## Status Alerts (2026)
+(List models/libraries that are deprecated, updated, or replaced. 
+Be specific: mention PyTorch 2.11 or GPT-4/5 if found in search.)
+
+## Critical Discrepancies
+(Correct any specific "stale" facts from the paper using the search data)
         """
     )
     human_content = f"ORIGINAL PAPER CONTENT: {state['pdf_content']}\n\n2026 SEARCH RESULTS: {search_results_text}"
@@ -114,8 +151,18 @@ def auditor_node(state:AuditState):
         ("human",human_content)
     ])
 
+    # Extract just the final formatted report from the response
+    content = report.content
+    if "The final answer is:" in content:
+        # Extract everything after "The final answer is:"
+        final_answer = content.split("The final answer is:", 1)[1].strip()
+        # Remove any markdown code blocks if present
+        if final_answer.startswith("```") and "```" in final_answer:
+            final_answer = final_answer.split("```", 2)[1]
+        content = final_answer
+
     return{
-        "messages":[AIMessage(content=report.content)]
+        "messages":[AIMessage(content=content)]
     }
 
 

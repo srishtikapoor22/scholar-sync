@@ -1,16 +1,19 @@
 import langgraph
 from langgraph.graph import StateGraph, START,END
-from .nodes import extraction_node
+from langchain_groq import ChatGroq
+from .nodes import extraction_node, auditor_node, KnowLedgeGrade
 from .tools import web_search
 from .state import AuditState
 from langgraph.prebuilt import ToolNode,tools_condition
 from langchain_core.messages import ToolMessage
-from .nodes import extraction_node, auditor_node
 from typing import Literal
 from pydantic import BaseModel,Field
 import os
-from langchain_groq import ChatGroq
-from .nodes import KnowLedgeGrade
+from dotenv import load_dotenv
+
+# Load environment variables from project root
+project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+load_dotenv(os.path.join(project_root, '.env'))
 
 tools=[web_search]
 workflow=StateGraph(AuditState)
@@ -43,23 +46,20 @@ def route_after_extraction(state: AuditState) -> Literal["web_search", "auditor"
     if not claims:
         return "__end__"
     
+    print(f"ROUTER: Found {len(claims)} claims")
+    for i, c in enumerate(claims):
+        time_sensitive = getattr(c, 'is_time_sensitive', False)
+        print(f"  Claim {i}: '{c.text}' | Time Sensitive: {time_sensitive}")
+    
     #extract the ones that are time sensitive
     needs_search = []
     for c in claims:
-        print(f"DEBUG: Claim '{c.text}' | Time Sensitive: {c.is_time_sensitive}")
-        if c.is_time_sensitive:
+        if getattr(c, 'is_time_sensitive', False):
             needs_search.append(c)
-    print(f"ROUTER: Found {len(claims)} claims, {len(needs_search)} require a 2026 status check.")
-    print("claims extracted:")
-    for claim in needs_search:
-        print(f" - {claim.text}")
-    #last_extraction=str(claims)
-    """grade = grader_llm.invoke([
-        ("system", "Evaluate if these technical dependencies are likely to have changed by 2026."),
-        ("human", f"Claims: {needs_search}")
-    ])"""
-
-    if needs_search and not has_searched:
+    print(f"ROUTER: {len(needs_search)} claims need search")
+    print(f"ROUTER: Decision - {'web_search' if needs_search else 'auditor'}")
+    # TEMP: Force web_search for testing
+    if claims:
         return "web_search"
     return "auditor"
     if grade.binary_score == "ambiguous":

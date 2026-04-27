@@ -3,6 +3,7 @@ langgraph>=1.1.0
 langchain>=1.2.0
 langchain-groq
 langchain-community>=0.4.0
+langchain-text-splitters>=0.3.0
 
 # Search & Tools
 langchain-tavily>=0.2.17
@@ -17,4 +18,8 @@ docling>=1.0.0
 pypdf>=4.0.0
 
 # Visualization & Debugging
-mermaid-python>=0.3.0
+mermaid-python>=0.1.0
+
+# Web backend for audit streaming
+fastapi>=0.103.0
+uvicorn>=0.24.0
